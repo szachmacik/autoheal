@@ -43,48 +43,39 @@ def sb_headers():
         "Content-Type": "application/json"
     }
 
-async def get_pending_alerts() -> list[dict]:
-    """Read unhandled alerts from Supabase (posted by Watchdog or Manus)."""
+async def _rpc(fn: str, params: dict):
+    """Call Supabase public_* RPC – works with anon key (SECURITY DEFINER)."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return []
+        return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(
-                f"{SUPABASE_URL}/rest/v1/autoheal_alerts",
-                headers=sb_headers(),
-                params={"handled": "eq.false", "order": "created_at.asc", "limit": "5"}
+            r = await c.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/{fn}",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                         "Content-Type": "application/json"},
+                json=params
             )
-            return r.json() if r.status_code == 200 else []
+            return r.json() if r.status_code == 200 else None
     except Exception as ex:
-        log.warning(f"Supabase read failed: {ex}")
-        return []
+        log.warning(f"RPC {fn}: {ex}")
+        return None
+
+async def get_pending_alerts() -> list[dict]:
+    """Read unhandled alerts via public_get_alerts (anon-accessible RPC)."""
+    result = await _rpc("public_get_alerts", {})
+    if isinstance(result, list):
+        return result
+    return []
 
 async def mark_alert_handled(alert_id: int, action: str):
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.patch(
-                f"{SUPABASE_URL}/rest/v1/autoheal_alerts?id=eq.{alert_id}",
-                headers={**sb_headers(), "Prefer": "return=minimal"},
-                json={"handled": True, "handled_at": "now()", "handled_by": "autoheal", "fix_applied": action}
-            )
-    except Exception as ex:
-        log.warning(f"Mark handled failed: {ex}")
+    await _rpc("public_mark_handled", {"p_id": alert_id, "p_action": action})
 
 async def log_action(app_uuid: str, app_name: str, action: str, diagnosis: str, confidence: int, success: bool, details: str = ""):
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(
-                f"{SUPABASE_URL}/rest/v1/autoheal_log",
-                headers={**sb_headers(), "Prefer": "return=minimal"},
-                json={"app_uuid": app_uuid, "app_name": app_name, "action": action,
-                      "diagnosis": diagnosis, "confidence": confidence, "success": success, "details": details}
-            )
-    except Exception:
-        pass
+    await _rpc("public_log_action", {
+        "p_app_uuid": app_uuid, "p_app_name": app_name, "p_action": action,
+        "p_diagnosis": diagnosis, "p_confidence": confidence,
+        "p_success": success, "p_details": details
+    })
 MAX_ATTEMPTS = 3
 
 
