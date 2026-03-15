@@ -31,6 +31,60 @@ logging.basicConfig(
 log = logging.getLogger("autoheal")
 
 fix_attempts: dict[str, int] = {}
+
+# Supabase config (for receiving alerts from Watchdog/Manus)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")  # service_role key
+
+def sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+
+async def get_pending_alerts() -> list[dict]:
+    """Read unhandled alerts from Supabase (posted by Watchdog or Manus)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{SUPABASE_URL}/rest/v1/autoheal_alerts",
+                headers=sb_headers(),
+                params={"handled": "eq.false", "order": "created_at.asc", "limit": "5"}
+            )
+            return r.json() if r.status_code == 200 else []
+    except Exception as ex:
+        log.warning(f"Supabase read failed: {ex}")
+        return []
+
+async def mark_alert_handled(alert_id: int, action: str):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.patch(
+                f"{SUPABASE_URL}/rest/v1/autoheal_alerts?id=eq.{alert_id}",
+                headers={**sb_headers(), "Prefer": "return=minimal"},
+                json={"handled": True, "handled_at": "now()", "handled_by": "autoheal", "fix_applied": action}
+            )
+    except Exception as ex:
+        log.warning(f"Mark handled failed: {ex}")
+
+async def log_action(app_uuid: str, app_name: str, action: str, diagnosis: str, confidence: int, success: bool, details: str = ""):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"{SUPABASE_URL}/rest/v1/autoheal_log",
+                headers={**sb_headers(), "Prefer": "return=minimal"},
+                json={"app_uuid": app_uuid, "app_name": app_name, "action": action,
+                      "diagnosis": diagnosis, "confidence": confidence, "success": success, "details": details}
+            )
+    except Exception:
+        pass
 MAX_ATTEMPTS = 3
 
 
@@ -398,8 +452,43 @@ async def check_cycle():
                 log.info(f"[{a['name']}] ✅ Recovered, resetting counter")
                 del fix_attempts[a["uuid"]]
 
-        # Heal max 2 at a time
-        for app in broken[:2]:
+        # === PRIORITY: Process alerts from Watchdog/Manus ===
+        pending = await get_pending_alerts()
+        if pending:
+            log.info(f"📬 {len(pending)} alerts from Watchdog/Manus")
+        for alert in pending[:2]:
+            app_uuid = alert["app_uuid"]
+            app_name = alert["app_name"]
+            source   = alert.get("source", "watchdog")
+            severity = alert.get("severity", "warning")
+            log.info(f"[{app_name}] Alert from {source} ({severity}): {alert.get('message','')[:80]}")
+
+            # Find app in current state
+            app = next((a for a in apps if a["uuid"] == app_uuid), None)
+            if not app:
+                await mark_alert_handled(alert["id"], "app_not_found")
+                continue
+            if "running" in app["status"]:
+                log.info(f"[{app_name}] Already healthy, marking handled")
+                await mark_alert_handled(alert["id"], "already_healthy")
+                continue
+
+            # Add logs from alert if available
+            if alert.get("logs"):
+                app["_alert_logs"] = alert["logs"]
+
+            try:
+                await heal_app(app)
+                await mark_alert_handled(alert["id"], "heal_attempted")
+            except Exception as ex:
+                log.error(f"[{app_name}] Heal error: {ex}")
+                await mark_alert_handled(alert["id"], f"error: {ex}")
+            await asyncio.sleep(5)
+
+        # === SECONDARY: Direct scan of broken apps not in alerts ===
+        alerted_uuids = {a["app_uuid"] for a in pending}
+        unalerted_broken = [a for a in broken if a["uuid"] not in alerted_uuids]
+        for app in unalerted_broken[:1]:  # max 1 extra per cycle
             try:
                 await heal_app(app)
                 await asyncio.sleep(5)
