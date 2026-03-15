@@ -61,11 +61,14 @@ async def list_apps() -> list[dict]:
 
 async def get_deployment_logs(app_uuid: str) -> str:
     try:
-        deploys = await coolify_get(f"/applications/{app_uuid}/deployments?per_page=1")
-        data = deploys.get("data", [])
-        if not data:
+        deploys = await coolify_get(f"/deployments?applicationId={app_uuid}")
+        # API returns dict {"0": {...}, "1": {...}} not a list
+        if not deploys:
             return "No deployments found"
-        deploy_uuid = data[0]["deployment_uuid"]
+        first = list(deploys.values())[0]
+        deploy_uuid = first.get("deployment_uuid")
+        if not deploy_uuid:
+            return "No deployment UUID found"
         detail = await coolify_get(f"/deployments/{deploy_uuid}")
         logs = detail.get("logs")
         if not logs:
