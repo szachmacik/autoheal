@@ -60,31 +60,48 @@ async def list_apps() -> list[dict]:
     } for a in apps]
 
 async def get_deployment_logs(app_uuid: str) -> str:
+    """Try multiple sources for logs: runtime first, then deployment logs."""
+    results = []
+
+    # 1. Try runtime container logs (works when container recently ran)
+    try:
+        runtime = await coolify_get(f"/applications/{app_uuid}/logs?lines=50")
+        if isinstance(runtime, dict) and runtime.get("logs"):
+            results.append("=== RUNTIME LOGS ===")
+            results.append(runtime["logs"][:2000])
+    except Exception:
+        pass
+
+    # 2. Try deployment logs via correct endpoint
     try:
         deploys = await coolify_get(f"/deployments?applicationId={app_uuid}")
-        # API returns dict {"0": {...}, "1": {...}} not a list
-        if not deploys:
-            return "No deployments found"
-        first = list(deploys.values())[0]
-        deploy_uuid = first.get("deployment_uuid")
-        if not deploy_uuid:
-            return "No deployment UUID found"
-        detail = await coolify_get(f"/deployments/{deploy_uuid}")
-        logs = detail.get("logs")
-        if not logs:
-            return "No logs in deployment"
-        entries = json.loads(logs)
-        errors = [
-            str(e.get("output", ""))[:400]
-            for e in entries
-            if not e.get("hidden") and any(
-                x in str(e.get("output", ""))
-                for x in ["ERROR", "error:", "ENOENT", "failed to", "exit code", "ERR_", "Cannot"]
-            )
-        ]
-        return "\n".join(errors[-20:]) if errors else "Build OK but container exited at runtime"
+        if deploys:
+            first = list(deploys.values())[0]
+            deploy_uuid = first.get("deployment_uuid")
+            if deploy_uuid:
+                detail = await coolify_get(f"/deployments/{deploy_uuid}")
+                logs = detail.get("logs")
+                if logs:
+                    entries = json.loads(logs)
+                    errors = [
+                        str(e.get("output", ""))[:400]
+                        for e in entries
+                        if not e.get("hidden") and any(
+                            x in str(e.get("output", ""))
+                            for x in ["ERROR", "error:", "ENOENT", "failed to", "exit code", "ERR_", "Cannot", "warning"]
+                        )
+                    ]
+                    if errors:
+                        results.append("=== DEPLOYMENT ERRORS ===")
+                        results.append("\n".join(errors[-15:]))
+                    # Also get last commit message for context
+                    commit_msg = first.get("commit_message", "")
+                    if commit_msg:
+                        results.append(f"=== LAST COMMIT: {commit_msg[:100]} ===")
     except Exception as ex:
-        return f"Log fetch error: {ex}"
+        results.append(f"Deployment log error: {ex}")
+
+    return "\n".join(results) if results else "No logs available from any source"
 
 async def deploy_app(uuid: str, force: bool = True) -> str:
     async with httpx.AsyncClient(timeout=30) as c:
