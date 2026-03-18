@@ -1,0 +1,18 @@
+name: Deploy to Coolify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Coolify Deploy
+        run: |
+          echo "Deploying autoheal → Coolify uuid=vcgk0g4sc4sck0kkc8k080gk"
+          curl -s -f -X POST \
+            "https://coolify.ofshore.dev/api/v1/deploy?uuid=vcgk0g4sc4sck0kkc8k080gk&force=false" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            && echo "✅ Deploy triggered" || echo "⚠️ Deploy trigger failed (non-critical)"
