@@ -1,0 +1,123 @@
+name: 🚀 Master Deploy - Clone Engine + Genspark + OnePass
+
+on:
+  workflow_dispatch:
+    inputs:
+      supabase_service_key:
+        description: 'Supabase Service Key (z Vault)'
+        required: true
+        type: string
+      anthropic_key:
+        description: 'Anthropic API Key'
+        required: false
+        type: string
+      together_key:
+        description: 'Together.ai API Key (FLUX images)'
+        required: false
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🗄️ SQL - Clone Engine Schema
+        run: |
+          curl -sf -X POST \
+            "https://blgdhfcosqjzrutncbbr.supabase.co/rest/v1/rpc/execute_sql_with_result" \
+            -H "apikey: ${{ github.event.inputs.supabase_service_key }}" \
+            -H "Authorization: Bearer ${{ github.event.inputs.supabase_service_key }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "SELECT 1"}' \
+            && echo "✅ Supabase połączony" || echo "⚠️ Sprawdź service key"
+
+      - name: 🏗️ Coolify - Clone Engine App
+        run: |
+          RESULT=$(curl -sf -X POST \
+            "https://coolify.ofshore.dev/api/v1/applications" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "project_uuid": "default",
+              "server_uuid": "default",
+              "type": "public",
+              "git_repository": "https://github.com/szachmacik/clone-engine",
+              "git_branch": "main",
+              "build_pack": "dockerfile",
+              "name": "clone-engine",
+              "domains": "https://clone.ofshore.dev",
+              "ports_exposes": "9000",
+              "environment_variables": [
+                {"key": "BRAIN_ROUTER_URL", "value": "https://brain-router.ofshore.dev"},
+                {"key": "SUPABASE_URL", "value": "https://blgdhfcosqjzrutncbbr.supabase.co"},
+                {"key": "SUPABASE_SERVICE_KEY", "value": "${{ github.event.inputs.supabase_service_key }}"},
+                {"key": "BROWSERLESS_URL", "value": "http://178.62.246.169:3000"}
+              ]
+            }' 2>&1)
+          echo "Clone Engine: $RESULT" | head -3
+
+      - name: 🤖 Coolify - Genspark Clone App
+        run: |
+          curl -sf -X POST \
+            "https://coolify.ofshore.dev/api/v1/applications" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "project_uuid": "default",
+              "server_uuid": "default",
+              "type": "public",
+              "git_repository": "https://github.com/szachmacik/genspark-clone",
+              "git_branch": "main",
+              "build_pack": "dockerfile",
+              "name": "genspark-clone",
+              "domains": "https://genspark.ofshore.dev",
+              "ports_exposes": "8000",
+              "environment_variables": [
+                {"key": "ANTHROPIC_API_KEY", "value": "${{ github.event.inputs.anthropic_key }}"},
+                {"key": "TOGETHER_API_KEY", "value": "${{ github.event.inputs.together_key }}"},
+                {"key": "TAVILY_API_KEY", "value": "tvly-placeholder"},
+                {"key": "BROWSERLESS_URL", "value": "http://178.62.246.169:3000"}
+              ]
+            }' | head -c 200
+
+      - name: 🔑 Coolify - OnePass App
+        run: |
+          curl -sf -X POST \
+            "https://coolify.ofshore.dev/api/v1/applications" \
+            -H "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "project_uuid": "default",
+              "server_uuid": "default",
+              "type": "public",
+              "git_repository": "https://github.com/szachmacik/onepass",
+              "git_branch": "main",
+              "build_pack": "dockerfile",
+              "name": "onepass",
+              "domains": "https://onepass.ofshore.dev",
+              "ports_exposes": "7000",
+              "environment_variables": [
+                {"key": "SUPABASE_URL", "value": "https://blgdhfcosqjzrutncbbr.supabase.co"},
+                {"key": "SUPABASE_SERVICE_KEY", "value": "${{ github.event.inputs.supabase_service_key }}"},
+                {"key": "OWNER_EMAIL", "value": "maciej@ofshore.dev"}
+              ]
+            }' | head -c 200
+
+      - name: 🐳 Docker - Browserless on server
+        run: |
+          echo "Browserless deploy via Coolify or SSH not available in GH Actions"
+          echo "Wykonaj ręcznie na serwerze:"
+          echo "docker run -d --name browserless --restart unless-stopped -p 3000:3000 -e TOKEN=sandbox_token_ofshore browserless/chrome:latest"
+
+      - name: 📣 Telegram - Deploy complete
+        run: |
+          curl -s "https://api.telegram.org/bot8394457153:AAFZQ4eMHaiAnmwejmTfWZHI_5KSqhXgCXg/sendMessage" \
+            -d "chat_id=8149345223" \
+            -d "parse_mode=Markdown" \
+            --data-urlencode "text=🚀 *GitHub Actions: Deploy triggered!*
+
+✅ Clone Engine → clone.ofshore.dev
+✅ Genspark Clone → genspark.ofshore.dev  
+✅ OnePass → onepass.ofshore.dev
+
+Aplikacje tworzone w Coolify.
+Sprawdź za 3-5 minut czy są up."
